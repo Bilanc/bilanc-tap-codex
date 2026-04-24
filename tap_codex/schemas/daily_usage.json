@@ -1,0 +1,187 @@
+{
+  "type": "object",
+  "properties": {
+    "workspace_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "start_time": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "end_time": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "start_date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "end_date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "user_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "actor": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email"
+        }
+      }
+    },
+    "totals": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "threads": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "turns": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "credits": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "uncached_text_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cached_text_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text_total_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "clients": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "properties": {
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threads": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "turns": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "credits": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "uncached_text_input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cached_text_input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "text_output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "text_total_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "inserted_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  }
+}
