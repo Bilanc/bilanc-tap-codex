@@ -1,7 +1,7 @@
 import collections
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import argparse
@@ -17,6 +17,7 @@ DAILY_USAGE_STREAM: str = "daily_usage"
 
 REQUEST_TIMEOUT_SECONDS: int = 300
 DEFAULT_PAGE_LIMIT: int = 1000
+DEFAULT_SYNC_WINDOW_DAYS: int = 30
 
 REQUIRED_CONFIG_KEYS: List[str] = ["start_date", "workspace_id"]
 
@@ -176,6 +177,23 @@ def _unix_seconds_to_iso(value: int) -> str:
     )
 
 
+def _iter_sync_windows(
+    start_time_unix: int, end_time_unix: int, window_days: int
+) -> List[tuple]:
+    window_size_seconds = int(timedelta(days=window_days).total_seconds())
+    windows: List[tuple] = []
+    current_start_time_unix = start_time_unix
+
+    while current_start_time_unix < end_time_unix:
+        current_end_time_unix = min(
+            current_start_time_unix + window_size_seconds, end_time_unix
+        )
+        windows.append((current_start_time_unix, current_end_time_unix))
+        current_start_time_unix = current_end_time_unix
+
+    return windows
+
+
 def get_daily_usage(
     schema: Dict[str, Any],
     state: Dict[str, Any],
@@ -184,84 +202,103 @@ def get_daily_usage(
     workspace_id: str,
     group: Optional[str] = None,
     limit: int = DEFAULT_PAGE_LIMIT,
+    window_days: int = DEFAULT_SYNC_WINDOW_DAYS,
 ) -> Dict[str, Any]:
     stream_name: str = DAILY_USAGE_STREAM
     bookmark_value: str = get_bookmark(state, stream_name, "since", start_date)
-    start_time_unix: int = _iso_to_unix_seconds(bookmark_value)
+    next_window_start_time_unix: int = _iso_to_unix_seconds(bookmark_value)
+    sync_end_time_unix: int = int(datetime.now(timezone.utc).timestamp())
 
     url: str = f"{BASE_URL}/analytics/codex/workspaces/{workspace_id}/usage"
 
-    latest_start_time_seen: int = start_time_unix
-    page_cursor: Optional[str] = None
+    if next_window_start_time_unix >= sync_end_time_unix:
+        logger.info(
+            "No Codex data to sync for %s. next_window_start_time_unix=%s sync_end_time_unix=%s",
+            stream_name,
+            next_window_start_time_unix,
+            sync_end_time_unix,
+        )
+        return state
 
     with metrics.record_counter(stream_name) as counter:
-        while True:
-            params: Dict[str, Any] = {
-                "start_time": start_time_unix,
-                "limit": limit,
-            }
-            if group:
-                params["group"] = group
-            if page_cursor:
-                params["page"] = page_cursor
+        for window_start_time_unix, window_end_time_unix in _iter_sync_windows(
+            next_window_start_time_unix, sync_end_time_unix, window_days
+        ):
+            logger.info(
+                "Fetching Codex usage from %s to %s",
+                _unix_seconds_to_iso(window_start_time_unix),
+                _unix_seconds_to_iso(window_end_time_unix),
+            )
 
-            response = authed_get(stream_name, url, params)
-            response.raise_for_status()
-            payload: Dict[str, Any] = response.json()
+            page_cursor: Optional[str] = None
 
-            rows: List[Dict[str, Any]] = payload.get("data", [])
-            extraction_time = singer.utils.now()
-
-            for row in rows:
-                row_start_time: Optional[int] = row.get("start_time")
-                row_end_time: Optional[int] = row.get("end_time")
-                record: Dict[str, Any] = {
-                    "workspace_id": workspace_id,
-                    "start_time": row_start_time,
-                    "end_time": row_end_time,
-                    "start_date": _unix_seconds_to_iso(row_start_time)
-                    if row_start_time is not None
-                    else None,
-                    "end_date": _unix_seconds_to_iso(row_end_time)
-                    if row_end_time is not None
-                    else None,
-                    "user_id": row.get("user_id"),
-                    "actor": row.get("actor"),
-                    "totals": row.get("totals"),
-                    "clients": row.get("clients", []),
-                    "inserted_at": singer.utils.strftime(extraction_time),
+            while True:
+                params: Dict[str, Any] = {
+                    "start_time": window_start_time_unix,
+                    "end_time": window_end_time_unix,
+                    "limit": limit,
                 }
+                if group:
+                    params["group"] = group
+                if page_cursor:
+                    params["page"] = page_cursor
 
-                try:
-                    with singer.Transformer() as transformer:
-                        rec = transformer.transform(
-                            record,
-                            schema,
-                            metadata=metadata.to_map(mdata),
-                        )
-                except Exception:
-                    logger.exception("Failed to transform record [%s]", record)
-                    raise
+                response = authed_get(stream_name, url, params)
+                response.raise_for_status()
+                payload: Dict[str, Any] = response.json()
 
-                singer.write_record(stream_name, rec, time_extracted=extraction_time)
-                counter.increment()
+                rows: List[Dict[str, Any]] = payload.get("data", [])
+                extraction_time = singer.utils.now()
 
-                if row_start_time is not None and row_start_time > latest_start_time_seen:
-                    latest_start_time_seen = row_start_time
+                for row in rows:
+                    row_start_time: Optional[int] = row.get("start_time")
+                    row_end_time: Optional[int] = row.get("end_time")
+                    record: Dict[str, Any] = {
+                        "workspace_id": workspace_id,
+                        "start_time": row_start_time,
+                        "end_time": row_end_time,
+                        "start_date": _unix_seconds_to_iso(row_start_time)
+                        if row_start_time is not None
+                        else None,
+                        "end_date": _unix_seconds_to_iso(row_end_time)
+                        if row_end_time is not None
+                        else None,
+                        "user_id": row.get("user_id"),
+                        "actor": row.get("actor"),
+                        "totals": row.get("totals"),
+                        "clients": row.get("clients", []),
+                        "inserted_at": singer.utils.strftime(extraction_time),
+                    }
 
-            has_more: bool = bool(payload.get("has_more"))
-            page_cursor = payload.get("next_page")
+                    try:
+                        with singer.Transformer() as transformer:
+                            rec = transformer.transform(
+                                record,
+                                schema,
+                                metadata=metadata.to_map(mdata),
+                            )
+                    except Exception:
+                        logger.exception("Failed to transform record [%s]", record)
+                        raise
 
-            if not has_more or not page_cursor:
-                break
+                    singer.write_record(
+                        stream_name, rec, time_extracted=extraction_time
+                    )
+                    counter.increment()
 
-        if latest_start_time_seen > start_time_unix or counter.value > 0:
+                has_more: bool = bool(payload.get("has_more"))
+                page_cursor = payload.get("next_page")
+
+                if not has_more or not page_cursor:
+                    break
+
             singer.write_bookmark(
                 state,
                 stream_name,
                 "since",
-                _unix_seconds_to_iso(latest_start_time_seen),
+                _unix_seconds_to_iso(window_end_time_unix),
             )
+            singer.write_state(state)
 
     return state
 
@@ -306,6 +343,9 @@ def do_sync(
     start_date: str = config["start_date"]
     group: Optional[str] = config.get("group")
     limit: int = int(config.get("limit", DEFAULT_PAGE_LIMIT))
+    window_days: int = int(config.get("window_days", DEFAULT_SYNC_WINDOW_DAYS))
+    if window_days <= 0:
+        raise CodexException("window_days must be greater than 0.")
 
     selected_stream_ids: List[str] = get_selected_streams(catalog)
     validate_dependencies(selected_stream_ids)
@@ -332,6 +372,7 @@ def do_sync(
                 workspace_id,
                 group,
                 limit,
+                window_days,
             )
             singer.write_state(state)
 
