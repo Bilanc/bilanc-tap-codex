@@ -12,7 +12,7 @@ setup(
     py_modules=["tap-codex"],
     install_requires=[
         "singer-python==5.12.1",
-        "requests==2.29.0",
+        "requests==2.31.0",
         "urllib3==2.8.0",
         "backoff==1.8.0",
         "python-dateutil==2.8.2",
