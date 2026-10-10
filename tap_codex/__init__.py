@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import argparse
+import backoff
 import requests
 import singer
 from singer import bookmarks, metadata, metrics
@@ -17,6 +18,9 @@ DAILY_USAGE_STREAM: str = "daily_usage"
 
 REQUEST_TIMEOUT_SECONDS: int = 300
 DEFAULT_PAGE_LIMIT: int = 1000
+MAX_REQUEST_ATTEMPTS: int = 5
+MAX_BACKOFF_SECONDS: int = 60
+RETRIABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 DEFAULT_SYNC_WINDOW_DAYS: int = 30
 
 REQUIRED_CONFIG_KEYS: List[str] = ["start_date", "workspace_id"]
@@ -38,6 +42,14 @@ class CodexException(Exception):
 
 class BadCredentialsException(CodexException):
     pass
+
+
+class RetriableServerError(CodexException):
+    def __init__(self, response: requests.Response):
+        self.response = response
+        super().__init__(
+            f"{response.status_code} Server Error for url: {response.url}"
+        )
 
 
 def translate_state(state: Dict[str, Any], catalog: Dict[str, Any]) -> Dict[str, Any]:
@@ -150,6 +162,16 @@ def get_request_timeout() -> float:
     return REQUEST_TIMEOUT_SECONDS
 
 
+@backoff.on_exception(
+    backoff.expo,
+    (
+        RetriableServerError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+    ),
+    max_tries=MAX_REQUEST_ATTEMPTS,
+    max_value=MAX_BACKOFF_SECONDS,
+)
 def authed_get(source: str, url: str, params: Dict[str, Any]) -> requests.Response:
     with metrics.http_request_timer(source) as timer:
         logger.info("Making GET request to %s with params %s", url, params)
@@ -161,6 +183,8 @@ def authed_get(source: str, url: str, params: Dict[str, Any]) -> requests.Respon
         )
         logger.info("Request received status code %s", resp.status_code)
         timer.tags[metrics.Tag.http_status_code] = resp.status_code
+        if resp.status_code in RETRIABLE_STATUS_CODES:
+            raise RetriableServerError(resp)
         return resp
 
 
