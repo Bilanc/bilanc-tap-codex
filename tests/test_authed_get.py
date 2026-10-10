@@ -1,4 +1,6 @@
+import time
 import unittest
+from email.utils import formatdate
 from unittest import mock
 
 import requests
@@ -33,24 +35,37 @@ class AuthedGetRetryTest(unittest.TestCase):
         self.assertEqual(m.call_count, 3)
 
     def test_429_honours_retry_after(self):
+        http_date = formatdate(time.time() + 45, usegmt=True)
         with requests_mock.Mocker(session=tap_codex.session) as m:
             m.get(
                 URL,
                 [
                     {"status_code": 429, "headers": {"Retry-After": "30"}},
-                    {"status_code": 429, "headers": {"Retry-After": "Thu, 01 Jan 2026 00:00:00 GMT"}},
+                    {"status_code": 429, "headers": {"Retry-After": http_date}},
                     {"status_code": 429, "headers": {"Retry-After": "600"}},
+                    {"status_code": 429, "headers": {"Retry-After": "garbage"}},
                     {"status_code": 200, "json": {"data": []}},
                 ],
             )
             resp = authed_get("daily_usage", URL, {})
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(m.call_count, 4)
+        self.assertEqual(m.call_count, 5)
         sleeps = [c.args[0] for c in self.sleep.call_args_list]
-        self.assertIn(30.0, sleeps)
-        self.assertIn(float(tap_codex.MAX_BACKOFF_SECONDS), sleeps)
-        self.assertNotIn(600.0, sleeps)
+        self.assertEqual(len(sleeps), 4)
+        self.assertEqual(sleeps[0], 30.0)
+        self.assertTrue(40 <= sleeps[1] <= 45, sleeps[1])
+        self.assertEqual(sleeps[2], float(tap_codex.MAX_BACKOFF_SECONDS))
+        self.assertLessEqual(sleeps[3], 8)
+
+    def test_does_not_sleep_after_final_attempt(self):
+        with requests_mock.Mocker(session=tap_codex.session) as m:
+            m.get(URL, status_code=429, headers={"Retry-After": "60"})
+            with self.assertRaises(RetriableServerError):
+                authed_get("daily_usage", URL, {})
+
+        self.assertEqual(m.call_count, tap_codex.MAX_REQUEST_ATTEMPTS)
+        self.assertEqual(self.sleep.call_count, tap_codex.MAX_REQUEST_ATTEMPTS - 1)
 
     def test_retries_5xx_then_succeeds(self):
         with requests_mock.Mocker(session=tap_codex.session) as m:

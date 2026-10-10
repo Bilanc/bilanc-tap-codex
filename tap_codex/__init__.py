@@ -3,6 +3,7 @@ import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 
 import argparse
@@ -62,9 +63,20 @@ def _retry_after_seconds(response: requests.Response) -> Optional[float]:
     if not header:
         return None
     try:
-        return min(float(header), float(MAX_BACKOFF_SECONDS))
+        seconds = float(header)
     except ValueError:
-        return None
+        try:
+            retry_at = parsedate_to_datetime(header)
+        except (TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    return min(max(seconds, 0.0), float(MAX_BACKOFF_SECONDS))
+
+
+def _backoff_seconds(attempt: int) -> float:
+    return backoff.full_jitter(min(2 ** (attempt - 1), MAX_BACKOFF_SECONDS))
 
 
 def translate_state(state: Dict[str, Any], catalog: Dict[str, Any]) -> Dict[str, Any]:
@@ -177,17 +189,7 @@ def get_request_timeout() -> float:
     return REQUEST_TIMEOUT_SECONDS
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        RetriableServerError,
-        requests.exceptions.ConnectionError,
-        requests.exceptions.Timeout,
-    ),
-    max_tries=MAX_REQUEST_ATTEMPTS,
-    max_value=MAX_BACKOFF_SECONDS,
-)
-def authed_get(source: str, url: str, params: Dict[str, Any]) -> requests.Response:
+def _request(source: str, url: str, params: Dict[str, Any]) -> requests.Response:
     with metrics.http_request_timer(source) as timer:
         logger.info("Making GET request to %s with params %s", url, params)
         resp = session.request(
@@ -198,13 +200,37 @@ def authed_get(source: str, url: str, params: Dict[str, Any]) -> requests.Respon
         )
         logger.info("Request received status code %s", resp.status_code)
         timer.tags[metrics.Tag.http_status_code] = resp.status_code
-        if _is_retriable_status(resp.status_code):
-            retry_after = _retry_after_seconds(resp)
-            if retry_after:
-                logger.info("Honouring Retry-After of %ss", retry_after)
-                time.sleep(retry_after)
-            raise RetriableServerError(resp)
         return resp
+
+
+def authed_get(source: str, url: str, params: Dict[str, Any]) -> requests.Response:
+    for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+        try:
+            resp = _request(source, url, params)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            if attempt == MAX_REQUEST_ATTEMPTS:
+                raise
+            error: Exception = exc
+            wait = _backoff_seconds(attempt)
+        else:
+            if not _is_retriable_status(resp.status_code):
+                return resp
+            error = RetriableServerError(resp)
+            if attempt == MAX_REQUEST_ATTEMPTS:
+                raise error
+            retry_after = _retry_after_seconds(resp)
+            wait = retry_after if retry_after is not None else _backoff_seconds(attempt)
+
+        logger.warning(
+            "Codex request failed (%s); retrying in %.1fs (attempt %s/%s)",
+            error,
+            wait,
+            attempt,
+            MAX_REQUEST_ATTEMPTS,
+        )
+        time.sleep(wait)
+
+    raise CodexException("unreachable")  # pragma: no cover
 
 
 def _iso_to_unix_seconds(value: str) -> int:
