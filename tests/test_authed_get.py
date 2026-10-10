@@ -10,9 +10,48 @@ from tap_codex import RetriableServerError, authed_get
 URL = "https://api.chatgpt.com/v1/analytics/codex/workspaces/ws/usage"
 
 
-@mock.patch("backoff._sync.time.sleep", lambda _seconds: None)
 @mock.patch("tap_codex.get_request_timeout", lambda: 1)
 class AuthedGetRetryTest(unittest.TestCase):
+    def setUp(self):
+        sleep_patcher = mock.patch("time.sleep")
+        self.sleep = sleep_patcher.start()
+        self.addCleanup(sleep_patcher.stop)
+
+    def test_retries_any_5xx(self):
+        with requests_mock.Mocker(session=tap_codex.session) as m:
+            m.get(
+                URL,
+                [
+                    {"status_code": 520, "text": "cloudflare"},
+                    {"status_code": 599, "text": "proxy"},
+                    {"status_code": 200, "json": {"data": []}},
+                ],
+            )
+            resp = authed_get("daily_usage", URL, {})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(m.call_count, 3)
+
+    def test_429_honours_retry_after(self):
+        with requests_mock.Mocker(session=tap_codex.session) as m:
+            m.get(
+                URL,
+                [
+                    {"status_code": 429, "headers": {"Retry-After": "30"}},
+                    {"status_code": 429, "headers": {"Retry-After": "Thu, 01 Jan 2026 00:00:00 GMT"}},
+                    {"status_code": 429, "headers": {"Retry-After": "600"}},
+                    {"status_code": 200, "json": {"data": []}},
+                ],
+            )
+            resp = authed_get("daily_usage", URL, {})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(m.call_count, 4)
+        sleeps = [c.args[0] for c in self.sleep.call_args_list]
+        self.assertIn(30.0, sleeps)
+        self.assertIn(float(tap_codex.MAX_BACKOFF_SECONDS), sleeps)
+        self.assertNotIn(600.0, sleeps)
+
     def test_retries_5xx_then_succeeds(self):
         with requests_mock.Mocker(session=tap_codex.session) as m:
             m.get(

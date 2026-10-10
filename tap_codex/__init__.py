@@ -1,6 +1,7 @@
 import collections
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -20,7 +21,7 @@ REQUEST_TIMEOUT_SECONDS: int = 300
 DEFAULT_PAGE_LIMIT: int = 1000
 MAX_REQUEST_ATTEMPTS: int = 5
 MAX_BACKOFF_SECONDS: int = 60
-RETRIABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+RATE_LIMIT_STATUS_CODE: int = 429
 DEFAULT_SYNC_WINDOW_DAYS: int = 30
 
 REQUIRED_CONFIG_KEYS: List[str] = ["start_date", "workspace_id"]
@@ -50,6 +51,20 @@ class RetriableServerError(CodexException):
         super().__init__(
             f"{response.status_code} Server Error for url: {response.url}"
         )
+
+
+def _is_retriable_status(status_code: int) -> bool:
+    return status_code == RATE_LIMIT_STATUS_CODE or status_code >= 500
+
+
+def _retry_after_seconds(response: requests.Response) -> Optional[float]:
+    header = response.headers.get("Retry-After")
+    if not header:
+        return None
+    try:
+        return min(float(header), float(MAX_BACKOFF_SECONDS))
+    except ValueError:
+        return None
 
 
 def translate_state(state: Dict[str, Any], catalog: Dict[str, Any]) -> Dict[str, Any]:
@@ -183,7 +198,11 @@ def authed_get(source: str, url: str, params: Dict[str, Any]) -> requests.Respon
         )
         logger.info("Request received status code %s", resp.status_code)
         timer.tags[metrics.Tag.http_status_code] = resp.status_code
-        if resp.status_code in RETRIABLE_STATUS_CODES:
+        if _is_retriable_status(resp.status_code):
+            retry_after = _retry_after_seconds(resp)
+            if retry_after:
+                logger.info("Honouring Retry-After of %ss", retry_after)
+                time.sleep(retry_after)
             raise RetriableServerError(resp)
         return resp
 
