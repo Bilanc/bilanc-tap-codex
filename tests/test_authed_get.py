@@ -1,6 +1,6 @@
-import time
 import unittest
-from email.utils import formatdate
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from unittest import mock
 
 import requests
@@ -35,8 +35,13 @@ class AuthedGetRetryTest(unittest.TestCase):
         self.assertEqual(m.call_count, 3)
 
     def test_429_honours_retry_after(self):
-        http_date = formatdate(time.time() + 45, usegmt=True)
-        with requests_mock.Mocker(session=tap_codex.session) as m:
+        now = datetime(2026, 10, 10, 20, 0, 0, tzinfo=timezone.utc)
+        http_date = format_datetime(now + timedelta(seconds=45), usegmt=True)
+        fake_datetime = mock.Mock(wraps=datetime)
+        fake_datetime.now.return_value = now
+        with mock.patch("tap_codex.datetime", fake_datetime), requests_mock.Mocker(
+            session=tap_codex.session
+        ) as m:
             m.get(
                 URL,
                 [
@@ -54,7 +59,7 @@ class AuthedGetRetryTest(unittest.TestCase):
         sleeps = [c.args[0] for c in self.sleep.call_args_list]
         self.assertEqual(len(sleeps), 4)
         self.assertEqual(sleeps[0], 30.0)
-        self.assertTrue(40 <= sleeps[1] <= 45, sleeps[1])
+        self.assertEqual(sleeps[1], 45.0)
         self.assertEqual(sleeps[2], float(tap_codex.MAX_BACKOFF_SECONDS))
         self.assertLessEqual(sleeps[3], 8)
 
